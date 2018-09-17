@@ -104,5 +104,5 @@ def main(url_list):
 
 
 if __name__ == "__main__":
-    url_list = ['http://www.wszg.org']
+    url_list = ['http://www.xxxxx.com']
     main(url_list)
