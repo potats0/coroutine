@@ -1,0 +1,108 @@
+#!/usr/bin/env python
+# -*- coding: UTF-8 -*-
+
+import asyncio
+import logging
+
+import aiohttp
+
+# 设置日志的参数
+LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
+DATE_FORMAT = "%Y/%d/%m %H:%M:%S %p"
+logging.basicConfig(level=logging.DEBUG, format=LOG_FORMAT, datefmt=DATE_FORMAT)
+logger = logging.getLogger('asyncio')
+
+# 设置扫描参数
+features = [b'\x50\x4b\x03\x04', b'\x52\x61\x72\x21', b'\x1f\x8b\x08\x00',
+            b'\x2d\x2d\x20\x4d', b'\x2d\x2d\x20\x70\x68', b'\x2f\x2a\x0a\x20\x4e',
+            b'\x2d\x2d\x20\x41\x64', b'\x2d\x2d\x20\x2d\x2d', b'\x2f\x2a\x0a\x4e\x61']
+suffixes = ['.rar', '.zip', '.sql', '.gz', '.sql.gz', '.tar.gz', '.bak', '.sql.bak']
+
+
+async def request(url):
+    """
+    流模式请求函数，只读取http response响应的前10个字节，并且返回Content-length
+    :param url:
+    :return:
+    """
+    logger.info(url)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            content = await resp.content.read(10)
+            return content, url, resp.headers.get('Content-Length')
+
+
+async def scan(target_url):
+    """
+    根据给定的url，探测远程服务器上是存在该文件
+    文件头识别
+   * rar:526172211a0700cf9073
+   * zip:504b0304140000000800
+   * gz：1f8b080000000000000b，也包括'.sql.gz'，取'1f8b0800' 作为keyword
+   * tar.gz: 1f8b0800
+   * mysqldump:                   -- MySQL dump:               2d2d204d7953514c
+   * phpMyAdmin:                  -- phpMyAdmin SQL Dump:      2d2d207068704d794164
+   * navicat:                     /* Navicat :                 2f2a0a204e617669636174
+   * Adminer:                     -- Adminer x.x.x MySQL dump: 2d2d2041646d696e6572
+   * Navicat MySQL Data Transfer: /* Navicat:                  2f2a0a4e617669636174
+   * 一种未知导出方式:               -- -------:                  2d2d202d2d2d2d2d2d2d
+    :param target_url:
+    :return:
+    """
+    context, url, size = await request(target_url)
+    for feature in features:
+        if feature in context:
+            logger.debug("[*] finded backup file : %s size: %d M" % (url, int(size) // 1024 // 1024))
+            return url, size
+    else:
+        return False
+
+
+def get_scanlist_from_url(url: str):
+    """
+    从url中生成敏感文件待扫描列表
+    :param url:
+    :return:
+    """
+    file_dic = ['bak.rar', 'bak.zip', 'backup.rar', 'backup.zip', 'www.zip', 'www.rar', 'web.rar', 'web.zip',
+                'wwwroot.rar',
+                'wwwroot.zip', 'www.tar.gz', 'web.tar.gz']
+    url = url.replace('http://', '').replace('https://', '')
+    host_items = url.split('.')
+    for suffix in suffixes:
+        file_dic.append("".join(host_items[1:]) + suffix)
+        file_dic.append(host_items[1] + suffix)
+        file_dic.append(host_items[-2] + suffix)
+        file_dic.append("".join(host_items) + suffix)
+        file_dic.append(url + suffix)
+    return list(set(file_dic))
+
+
+async def start(url, semaphore):  #
+    async with semaphore:
+        tasks = []
+        scanlist = get_scanlist_from_url(url)
+        for item in scanlist:
+            target_url = url + "/" + item
+            task = asyncio.create_task(scan(target_url))
+            tasks.append(task)
+        await asyncio.wait(tasks)
+        for task in tasks:
+            if task.result():
+                return task.result()
+        return False
+
+
+def main(url_list):
+    loop = asyncio.get_event_loop()
+    tasks = []
+    semaphore = asyncio.Semaphore(200)
+    for url in url_list:
+        task = loop.create_task(start(url, semaphore))
+        tasks.append(task)
+    loop.run_until_complete(asyncio.wait(tasks))
+
+
+if __name__ == "__main__":
+    url_list = ['http://www.wszg.org']
+    main(url_list)
